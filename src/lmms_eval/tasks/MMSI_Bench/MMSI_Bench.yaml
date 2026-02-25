@@ -1,15 +1,14 @@
 
-dataset_path: data/media/MMSI_Bench
+dataset_path: parquet
 dataset_kwargs:
-  token: True
-  # cache_dir: vsibench
-  # video: True
+  data_files:
+    test: data/evaluation/MMSI_Bench/MMSI_Bench.parquet
 task: MMSI_Bench
 test_split: test
 output_type: generate_until
 doc_to_visual: !function utils.MMSI_Bench_doc_to_visual
 doc_to_text: !function utils.MMSI_Bench_doc_to_text
-doc_to_target: "ground_truth"
+doc_to_target: "answer"
 generation_kwargs:
   max_new_tokens: 16
   temperature: 0

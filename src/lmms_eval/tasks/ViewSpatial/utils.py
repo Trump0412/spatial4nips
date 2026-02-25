@@ -27,6 +27,17 @@ METRICS_FOR_NA = {
     "MRA:.5:.95:.05": "partial(relative_accuracy, delta=2)",
 }
 
+import re
+
+def _norm_choice_letter(x):
+    """Extract A/B/C/D from strings like 'A', 'A. right', '(A) right', 'Answer: A'."""
+    if x is None:
+        return None
+    if not isinstance(x, str):
+        x = str(x)
+    m = re.search(r'\b([ABCD])\b', x.upper())
+    return m.group(1) if m else None
+
 def to_float(pred):
     try:
         pred = float(pred)
@@ -109,7 +120,7 @@ def exact_match(pred, target):
 def ViewSpatial_process_results(doc, results):
     doc["prediction"] = results[0]
     for key, value in METRICS_FOR_MCA.items():
-        doc[key] = eval(value)(fuzzy_matching(doc['prediction']), doc["answer"])      # True 表示对，False 表示错
+        doc[key] = eval(value)(fuzzy_matching(_norm_choice_letter(doc['prediction'])), _norm_choice_letter(doc["answer"]))      # True 表示对，False 表示错
         
     return {"ViewSpatial_score": doc}
 
@@ -130,3 +141,4 @@ def ViewSpatial_aggregate_results(results):
 
     eval_logger.info(f"Evaluation results: {output}")
     return output['overall'] * 100.
+

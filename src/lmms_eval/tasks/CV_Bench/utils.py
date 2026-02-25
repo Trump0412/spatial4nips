@@ -72,8 +72,26 @@ cache_dir = dataset_path
 #     cache_dir = os.path.join(base_cache_dir, cache_name)
 
 def CV_Bench_doc_to_visual(doc):
-    images = [Image.open(io.BytesIO(doc.pop('image')['bytes']))]
-    return [images]
+    img = doc.get("image", None)
+    if img is None:
+        raise KeyError(f"Missing 'image' in doc keys={list(doc.keys())}")
+
+    # 1) 已经是 PIL.Image（你现在就是这种）
+    if isinstance(img, Image.Image):
+        return [img.convert("RGB")]
+
+    # 2) datasets Image feature 有时是 dict: {"bytes":..., "path":...}
+    if isinstance(img, dict):
+        if img.get("bytes") is not None:
+            return [Image.open(io.BytesIO(img["bytes"])).convert("RGB")]
+        if img.get("path") is not None:
+            return [Image.open(img["path"]).convert("RGB")]
+
+    # 3) 也可能直接给 bytes
+    if isinstance(img, (bytes, bytearray)):
+        return [Image.open(io.BytesIO(img)).convert("RGB")]
+
+    raise TypeError(f"Unsupported image type: {type(img)}")
 
 
 def CV_Bench_doc_to_text(doc, lmms_eval_specific_kwargs=None):
@@ -101,7 +119,7 @@ def exact_match(pred, target):
 
 def CV_Bench_process_results(doc, results):
 
-    doc.pop('image')
+    doc.pop('image', None)
     assert doc["answer"][1] in "ABCDEFGHJKL", print(doc["answer"])
 
     doc["prediction"] = results[0]

@@ -1,0 +1,125 @@
+{
+  "results": {
+    "MMSI_Bench": {
+      "alias": "MMSI_Bench",
+      "MMSI_Bench_score,none": 32.655907250619485,
+      "MMSI_Bench_score_stderr,none": "N/A"
+    }
+  },
+  "group_subtasks": {
+    "MMSI_Bench": []
+  },
+  "configs": {
+    "MMSI_Bench": {
+      "task": "MMSI_Bench",
+      "dataset_path": "parquet",
+      "dataset_kwargs": {
+        "data_files": {
+          "test": "data/evaluation/MMSI_Bench/MMSI_Bench.parquet"
+        }
+      },
+      "test_split": "test",
+      "full_docs": false,
+      "process_results_use_image": false,
+      "doc_to_visual": "<function MMSI_Bench_doc_to_visual at 0x7f8c91907f40>",
+      "doc_to_text": "<function MMSI_Bench_doc_to_text at 0x7f8c91944820>",
+      "doc_to_target": "answer",
+      "process_results": "<function MMSI_Bench_process_results at 0x7f8c919451b0>",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "MMSI_Bench_score",
+          "aggregation": "<function MMSI_Bench_aggregate_results at 0x7f8c91945a20>",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_new_tokens": 16,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "num_beams": 1,
+        "do_sample": false,
+        "until": [
+          "\n\n"
+        ]
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": [
+        {
+          "version": 0.0
+        }
+      ],
+      "lmms_eval_specific_kwargs": {
+        "default": {
+          "pre_prompt": "",
+          "mca_post_prompt": "Answer with the option's letter from the given choices directly.",
+          "na_post_prompt": "Please answer the question using a single word or phrase."
+        },
+        "gemini_api": {
+          "pre_prompt": "",
+          "mca_post_prompt": "Answer with the option's letter from the given choices directly.",
+          "na_post_prompt": "Do not response anything other than a single number!"
+        },
+        "gpt4v": {
+          "pre_prompt": "",
+          "mca_post_prompt": "Answer with the option's letter from the given choices directly.",
+          "na_post_prompt": "Do not response anything other than a single number!"
+        },
+        "pre_prompt": "",
+        "mca_post_prompt": "Answer with the option's letter from the given choices directly.",
+        "na_post_prompt": "Please answer the question using a single word or phrase."
+      }
+    }
+  },
+  "versions": {
+    "MMSI_Bench": "Yaml"
+  },
+  "n-shot": {
+    "MMSI_Bench": 0
+  },
+  "higher_is_better": {
+    "MMSI_Bench": {
+      "MMSI_Bench_score": true
+    }
+  },
+  "n-samples": {
+    "MMSI_Bench": {
+      "original": 1000,
+      "effective": 1000
+    }
+  },
+  "config": {
+    "model": "geothinker",
+    "model_args": "pretrained=checkpoints/GeoThinker-VGGT-Scaled-Qwen25VL-7B,use_flash_attention_2=true,max_num_frames=32,max_length=12800,max_pixels=451584,min_pixels=12544",
+    "batch_size": "1",
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": null,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": "",
+    "random_seed": 0,
+    "numpy_seed": 1234,
+    "torch_seed": 1234,
+    "fewshot_seed": 1234
+  },
+  "git_hash": "e9b3786",
+  "date": "20260222_073403",
+  "task_hashes": {},
+  "model_source": "geothinker",
+  "model_name": "checkpoints/GeoThinker-VGGT-Scaled-Qwen25VL-7B",
+  "model_name_sanitized": "checkpoints__GeoThinker-VGGT-Scaled-Qwen25VL-7B",
+  "system_instruction": null,
+  "system_instruction_sha": null,
+  "fewshot_as_multiturn": false,
+  "chat_template": null,
+  "chat_template_sha": null,
+  "start_time": 2303145.835202364,
+  "end_time": 2303207.933063044,
+  "total_evaluation_time_seconds": "62.0978606804274"
+}

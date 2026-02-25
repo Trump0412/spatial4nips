@@ -1,9 +1,7 @@
-
-dataset_path: data/evaluation/ViewSpatial
+dataset_path: data/media/ViewSpatial
 dataset_kwargs:
-  token: True
-  # cache_dir: vsibench
-  # video: True
+  data_files:
+    test: /data3/yeyuanhao/sp_re_cbp/GeoThinker/data/evaluation/ViewSpatial/ViewSpatial-Bench/ViewSpatial-Bench.json
 task: ViewSpatial
 test_split: test
 output_type: generate_until

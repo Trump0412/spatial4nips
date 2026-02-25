@@ -72,8 +72,19 @@ cache_dir = dataset_path
 #     cache_dir = os.path.join(base_cache_dir, cache_name)
 
 def MMSI_Bench_doc_to_visual(doc):
-    images = [Image.open(io.BytesIO(image_rb)) for image_rb in doc['images']]
-    return [images]
+    imgs = []
+    for x in doc["images"]:
+        if isinstance(x, Image.Image):
+            imgs.append(x.convert("RGB"))
+        elif isinstance(x, dict) and x.get("bytes") is not None:
+            imgs.append(Image.open(io.BytesIO(x["bytes"])).convert("RGB"))
+        elif isinstance(x, (bytes, bytearray)):
+            imgs.append(Image.open(io.BytesIO(x)).convert("RGB"))
+        elif isinstance(x, str):
+            imgs.append(Image.open(x).convert("RGB"))
+        else:
+            raise TypeError(f"Unsupported image item type: {type(x)}")
+    return [imgs]   # 注意：外层 list 表示“单轮对话”，内层是“多图”
 
 
 def MMSI_Bench_doc_to_text(doc, lmms_eval_specific_kwargs=None):

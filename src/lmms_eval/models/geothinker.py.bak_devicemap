@@ -128,7 +128,7 @@ class GeoThinker(lmms):
             self._model = load_class.from_pretrained(
                 pretrained,
                 config=config,
-                torch_dtype=torch.float16,
+                torch_dtype=torch.bfloat16,
                 device_map=self.device_map,
                 attn_implementation="flash_attention_2",
             ).eval()
@@ -179,12 +179,7 @@ class GeoThinker(lmms):
         else:
             self._rank = 0
             self._world_size = 1
-            if getattr(self._model, "hf_device_map", None) is None: 
-                self._model = self._model.to(self._device).to(torch.bfloat16)
-            else:
-                # model is already sharded by device_map="auto"
-                self._model = self._model
-
+            self._model = self.model.to("cuda").to(torch.bfloat16)
 
     @property
     def config(self):

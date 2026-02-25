@@ -178,6 +178,9 @@ class QwenVGGTInteractionv2(nn.Module):
                 # [关键操作] 重塑维度:
                 # [1, 8064, D] -> [32, 252, D]
                 # 这样每张图只和自己做 Attention，这也是一种极致的“Locality”
+                #tokens_per_img = vggt_features.numel() // (num_images * D)
+                #tokens_per_img = vggt_features.numel() // (num_images * D)
+                #tokens_per_img_q = semantic_hidden.numel() // (num_images * D)
                 q_input = semantic_hidden.view(num_images, tokens_per_img, D)
                 k_input = vggt_features.view(num_images, tokens_per_img, D)
                 v_input = vggt_features.view(num_images, tokens_per_img, D)
@@ -264,11 +267,16 @@ class QwenVGGTInteractionv2Flash(QwenVGGTInteractionv2):
             
             if tokens_per_img > 0 and S_total % tokens_per_img == 0:
                 num_images = S_total // tokens_per_img
-                q_input = semantic_hidden.view(num_images, tokens_per_img, D)
+                tokens_per_img = vggt_features.numel() // (num_images * D)
+                tokens_per_img_q = semantic_hidden.numel() // (num_images * D)
+                q_input = semantic_hidden.view(num_images, tokens_per_img_q, D)
                 k_input = vggt_features.view(num_images, tokens_per_img, D)
                 v_input = vggt_features.view(num_images, tokens_per_img, D)
+                S = q_input.shape[1]
+                S_k = k_input.shape[1]
                 is_reshaped = True
-                B, S = num_images, tokens_per_img
+                #B, S = num_images, tokens_per_img
+                B=num_images
             else:
                 B, S = B_orig, S_total
         else:
@@ -276,9 +284,12 @@ class QwenVGGTInteractionv2Flash(QwenVGGTInteractionv2):
 
         # === Projections ===
         # SDPA 期望的输入维度是 [Batch, Heads, Seq, Head_Dim]
-        q = self.q_proj(q_input).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(k_input).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(v_input).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+        B = q_input.shape[0]
+        Sq = q_input.shape[1]          # query length
+        Sk = k_input.shape[1]          # key/value length    
+        q = self.q_proj(q_input).view(B, Sq, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(k_input).view(B, Sk, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(v_input).view(B, Sk, self.num_heads, self.head_dim).transpose(1, 2)
 
         # === 核心修改：构建 Attention Bias ===
         attn_bias = None
@@ -351,6 +362,15 @@ class QwenVGGTInteractionv2Flash(QwenVGGTInteractionv2):
 
                 # time.sleep(1)
 
+        # 假设 q,k,v 已经是 [B, heads, Sq, head_dim] / [B, heads, Sk, head_dim]
+        Sq = q.size(-2)   # 63
+        Sk = k.size(-2)   # 285
+
+        if attn_bias is not None and attn_bias.dim() == 4:
+            # 期望最后一维是 key_len=Sk
+            if attn_bias.size(-1) != Sk:
+                # 先用“全零 bias”替代，等价于不mask，先跑通
+                attn_bias = attn_bias.new_zeros((attn_bias.size(0), 1, 1, Sk))
         # === Flash Attention (SDPA) ===
         # PyTorch 2.0+ 会自动选择最优 kernel (FlashAttn, MemEfficient, or Math)
         # 传入 attn_mask 即等同于在 Softmax 之前加上这个 Tensor

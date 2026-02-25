@@ -1744,35 +1744,7 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLPreTrainedModel, Gene
                 h_patch = height // self.geometry_encoder.patch_size // 2
                 w_patch = width // self.geometry_encoder.patch_size // 2
                 smi_downsample_rate = getattr(self.config, 'smi_downsample_rate', 2)
-                # --- grid alignment patch (keep frames, support varying visual grids) ---
-                dim = geo_embeds.shape[-1]
-                tokens = image_embeds.numel() // dim
-                tokens_per_frame = tokens // n_image
-
-                import math
-                target_ratio = (w_patch / h_patch) if h_patch > 0 else 1.0
-                best = None
-                for h in range(1, int(math.sqrt(tokens_per_frame)) + 1):
-                    if tokens_per_frame % h != 0:
-                        continue
-                    w = tokens_per_frame // h
-                    r = w / h  # enforce w>=h by construction
-                    score = abs(r - target_ratio)
-                    cand = (score, h, w)
-                    if best is None or cand < best:
-                        best = cand
-
-                _, h_img, w_img = best
-
-                # if visual grid != geo grid, resize geo_embeds to visual grid
-                if (h_img != h_patch) or (w_img != w_patch):
-                    geo = geo_embeds.permute(0, 3, 1, 2)  # (n, C, H, W)
-                    geo = F.interpolate(geo, size=(h_img, w_img), mode="bilinear", align_corners=False)
-                    geo_embeds = geo.permute(0, 2, 3, 1)  # (n, H, W, C)
-
-                image_embeds = image_embeds.reshape(n_image, h_img, w_img, dim)
-                # --- end patch ---
-
+                image_embeds = image_embeds.view(n_image, h_patch, w_patch, geo_embeds.shape[-1])
                 image_embeds = image_embeds.permute(0, 3, 1, 2)
                 image_embeds = torch.nn.functional.interpolate(
                     image_embeds, 
