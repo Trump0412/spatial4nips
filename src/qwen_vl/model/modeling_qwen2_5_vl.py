@@ -50,7 +50,6 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from .configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
-from .vggt.models.vggt import VGGT
 from .geometry_encoders import create_geometry_encoder, GeometryEncoderConfig
 from .feature_fusion import FeatureFusionModule, FeatureFusionConfig, GeometryFeatureMerger
 from .loss import normalize_pointcloud, check_and_fix_inf_nan
@@ -1793,20 +1792,38 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLPreTrainedModel, Gene
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
         geometry_encoder_path = kwargs.pop("geometry_encoder_path", None)
+        output_loading_info = kwargs.pop("output_loading_info", False)
+        kwargs.setdefault("ignore_mismatched_sizes", True)
 
-        model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-        # state_dict = model.state_dict()
-        # vggt_keys = [key for key in state_dict.keys() if 'vggt' in key]
-        # print(f"Loaded keys related to vggt: {vggt_keys}")
-        
+        model, loading_info = super().from_pretrained(
+            pretrained_model_name_or_path,
+            *model_args,
+            output_loading_info=True,
+            **kwargs,
+        )
+
+        missing_keys = loading_info.get("missing_keys", [])
+        unexpected_keys = loading_info.get("unexpected_keys", [])
+        mismatched_keys = loading_info.get("mismatched_keys", [])
+        if missing_keys or unexpected_keys or mismatched_keys:
+            print(
+                "[GeoThinker Load] "
+                f"missing_keys={len(missing_keys)}, "
+                f"unexpected_keys={len(unexpected_keys)}, "
+                f"mismatched_keys={len(mismatched_keys)}"
+            )
+            if missing_keys:
+                print("[GeoThinker Load] missing_keys:", missing_keys)
+            if unexpected_keys:
+                print("[GeoThinker Load] unexpected_keys:", unexpected_keys)
+            if mismatched_keys:
+                print("[GeoThinker Load] mismatched_keys:", mismatched_keys)
 
         if geometry_encoder_path:
             model.geometry_encoder.load_model(geometry_encoder_path)
 
-            # geometry_state_dict = model.geometry_encoder.state_dict()
-            # print(f"Loaded keys in geometry_encoder: {list(geometry_state_dict.keys())}")
-
-        
+        if output_loading_info:
+            return model, loading_info
         return model
 
     def get_input_embeddings(self):

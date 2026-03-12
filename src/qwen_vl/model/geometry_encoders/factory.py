@@ -4,6 +4,7 @@ from typing import Optional
 from .base import BaseGeometryEncoder, GeometryEncoderConfig
 from .vggt_encoder import VGGTEncoder
 from .pi3_encoder import Pi3Encoder
+from .da3_encoder import DA3Encoder
 
 
 def create_geometry_encoder(
@@ -38,10 +39,12 @@ def create_geometry_encoder(
         return VGGTEncoder(config)
     elif encoder_type == "pi3":
         return Pi3Encoder(config)
+    elif encoder_type == "da3":
+        return DA3Encoder(config)
     else:
         raise ValueError(f"Unknown geometry encoder type: {encoder_type}")
 
 
 def get_available_encoders():
     """Get list of available encoder types."""
-    return ["vggt", "pi3"]
+    return ["vggt", "pi3", "da3"]

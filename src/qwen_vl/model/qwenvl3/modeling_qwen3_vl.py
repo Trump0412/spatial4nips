@@ -42,7 +42,6 @@ from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
 from .configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
 
-from ..vggt.models.vggt import VGGT
 from ..geometry_encoders import create_geometry_encoder, GeometryEncoderConfig
 from ..feature_fusion import FeatureFusionModule, FeatureFusionConfig, GeometryFeatureMerger
 from ..qwen_interaction import *
@@ -1573,12 +1572,38 @@ class Qwen3VLForConditionalGenerationWithVGGT(Qwen3VLPreTrainedModel, Generation
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
         geometry_encoder_path = kwargs.pop("geometry_encoder_path", None)
+        output_loading_info = kwargs.pop("output_loading_info", False)
+        kwargs.setdefault("ignore_mismatched_sizes", True)
 
-        model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-        
+        model, loading_info = super().from_pretrained(
+            pretrained_model_name_or_path,
+            *model_args,
+            output_loading_info=True,
+            **kwargs,
+        )
+
+        missing_keys = loading_info.get("missing_keys", [])
+        unexpected_keys = loading_info.get("unexpected_keys", [])
+        mismatched_keys = loading_info.get("mismatched_keys", [])
+        if missing_keys or unexpected_keys or mismatched_keys:
+            print(
+                "[GeoThinker Load] "
+                f"missing_keys={len(missing_keys)}, "
+                f"unexpected_keys={len(unexpected_keys)}, "
+                f"mismatched_keys={len(mismatched_keys)}"
+            )
+            if missing_keys:
+                print("[GeoThinker Load] missing_keys:", missing_keys)
+            if unexpected_keys:
+                print("[GeoThinker Load] unexpected_keys:", unexpected_keys)
+            if mismatched_keys:
+                print("[GeoThinker Load] mismatched_keys:", mismatched_keys)
+
         if geometry_encoder_path:
             model.model.geometry_encoder.load_model(geometry_encoder_path)
 
+        if output_loading_info:
+            return model, loading_info
         return model
 
     def get_input_embeddings(self):

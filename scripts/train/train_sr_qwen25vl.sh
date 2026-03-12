@@ -1,5 +1,8 @@
 #!/bin/bash
 # Complete QwenVL Training Launch Script with Full Parameter Documentation
+# Prerequisites:
+# 1) Install DA3 package first (e.g. `pip install depth-anything-3` or editable install from thirdparty/Depth-Anything-3).
+# 2) Download DA3 checkpoints locally and set GEOMETRY_ENCODER_PATH to that local path.
 
 # Qwen2.5VL works on transformers=4.50.0, and may not work on transformers=4.57.0
 pip install transformers==4.50.0
@@ -16,8 +19,8 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 # Path Configuration
 # ======================
 MODEL_PATH="Qwen/Qwen2.5-VL-7B-Instruct/"  # [ModelArguments] Pretrained model path
-GEOMETRY_ENCODER_TYPE="vggt"
-GEOMETRY_ENCODER_PATH="facebook/VGGT-1B"
+GEOMETRY_ENCODER_TYPE="da3"
+GEOMETRY_ENCODER_PATH="${HOME}/sp_re_cbp/checkpoints/DA3-GIANT-1.1"
 OUTPUT_DIR="PATH_TO_OUTPUT_DIR"                   # Directory for saving checkpoints
 CACHE_DIR="./cache"                        # [TrainingArguments] Cache directory for models
 mkdir -p $OUTPUT_DIR
