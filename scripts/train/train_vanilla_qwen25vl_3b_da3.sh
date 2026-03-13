@@ -28,7 +28,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 # Path Configuration
 # ======================
 GEOMETRY_ENCODER_TYPE="da3"
-GEOMETRY_ENCODER_PATH="/data3/yeyuanhao/checkpoints/DA3-GIANT"
+GEOMETRY_ENCODER_PATH="/data3/yeyuanhao/checkpoints/DA3-GIANT-1.1"
 OUTPUT_DIR=${OUTPUT_DIR:-"${PROJECT_ROOT}/outputs/vanilla_qwen25vl_3b_da3"}
 LOG_DIR=${LOG_DIR:-"${PROJECT_ROOT}/logs/vanilla_qwen25vl_3b_da3"}
 TRAIN_LOG=${TRAIN_LOG:-"${LOG_DIR}/train.log"}
