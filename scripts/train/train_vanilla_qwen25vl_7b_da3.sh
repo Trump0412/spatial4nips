@@ -12,7 +12,8 @@ set -euo pipefail
 PROJECT_ROOT=${PROJECT_ROOT:-"/data3/yeyuanhao/sp_re_cbp/GeoThinker"}
 MODEL_PATH=${MODEL_PATH:-"/data3/yeyuanhao/sp_re_cbp/TRASE/models/Qwen2.5-VL-7B-Instruct"}
 GEOMETRY_ENCODER_TYPE=${GEOMETRY_ENCODER_TYPE:-"da3"}
-GEOMETRY_ENCODER_PATH=${GEOMETRY_ENCODER_PATH:-"/data3/yeyuanhao/checkpoints/DA3-GIANT-1.1"}
+GEOMETRY_ENCODER_PATH=${GEOMETRY_ENCODER_PATH:-"/data3/yeyuanhao/checkpoints/DA3-GIANT"}
+GEO_INJECT_VERSION=${GEO_INJECT_VERSION:-"da3_sgf_baseline"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${PROJECT_ROOT}/outputs/vanilla_qwen25vl_7b_da3"}
 LOG_DIR=${LOG_DIR:-"${PROJECT_ROOT}/logs/vanilla_qwen25vl_7b_da3"}
 TRAIN_LOG=${TRAIN_LOG:-"${LOG_DIR}/train.log"}
@@ -61,6 +62,7 @@ fi
 
 echo "[INFO] MODEL_PATH=${MODEL_PATH}"
 echo "[INFO] GEOMETRY_ENCODER_PATH=${GEOMETRY_ENCODER_PATH}"
+echo "[INFO] GEO_INJECT_VERSION=${GEO_INJECT_VERSION}"
 echo "[INFO] DATASETS=${DATASETS}"
 echo "[INFO] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[INFO] TRAIN_LOG=${TRAIN_LOG}"
@@ -111,6 +113,7 @@ torchrun --nproc_per_node="${NPROC_PER_NODE}" \
             --geometry_encoder_path "${GEOMETRY_ENCODER_PATH}" \
             --feature_fusion_method "zero" \
             --geo_cross_attn True \
+            --geo_inject_version "${GEO_INJECT_VERSION}" \
             --geo_importance_gate True \
             --depart_smi_token True \
             "${EXTRA_ARGS_ARRAY[@]}" \

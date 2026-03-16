@@ -56,7 +56,7 @@ def all_gather_batch(tensors):
 class FeatureFusionConfig:
     """Configuration for feature fusion."""
     fusion_method: str = "add"  # "add", "concat", "gated", "weighted", "cross_attention", "zero"
-    hidden_size: int = 3584
+    hidden_size: int = 0
     num_heads: int = 8
     dropout: float = 0.1
     num_layers: int = 1
@@ -205,6 +205,8 @@ class FeatureFusionModule(nn.Module):
         self.config = config
         self.fusion_method = config.fusion_method
         self.hidden_size = config.hidden_size
+        if self.hidden_size <= 0:
+            raise ValueError("FeatureFusionConfig.hidden_size must be provided explicitly.")
         
         self._build_fusion_layers()
     

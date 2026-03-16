@@ -54,6 +54,7 @@ from .geometry_encoders import create_geometry_encoder, GeometryEncoderConfig
 from .feature_fusion import FeatureFusionModule, FeatureFusionConfig, GeometryFeatureMerger
 from .loss import normalize_pointcloud, check_and_fix_inf_nan
 from .qwen_interaction import *
+from .msgf_utils import compute_stage_ranges
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func, flash_attn_func
@@ -1067,6 +1068,11 @@ QWEN2_5_VL_GEOMETRY_ATTENTION_CLASSES = {
     "v1": QwenVGGTInteractionv1,
     "v2": QwenVGGTInteractionv2,
     "v2_flash": QwenVGGTInteractionv2Flash,
+    "vggt_sgf_baseline": QwenVGGTInteractionv2Flash,
+    "da3_sgf_baseline": QwenDA3SGFBaseline,
+    "da3_msgf_base": QwenDA3MSGFBase,
+    "da3_hmsgf": QwenDA3HMSGF,
+    "da3_rmsgf": QwenDA3RMSGF,
 }
 
 
@@ -1086,17 +1092,25 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        quarter_num = config.num_hidden_layers // 4
         self.cross_flag = hasattr(config, "geo_cross_attn") and config.geo_cross_attn
 
         if self.cross_flag:
             self.geo_inject_version = getattr(config, "geo_inject_version", "v2flash")
         
             if self.geo_inject_version in ["v1"]:
+                quarter_num = config.num_hidden_layers // 4
                 self.cross_flag = self.cross_flag and (layer_idx > quarter_num ) and (layer_idx < (config.num_hidden_layers - quarter_num)  )
-            elif self.geo_inject_version in ["v2","v2_flash"]:
+            elif self.geo_inject_version in ["v2","v2_flash", "vggt_sgf_baseline"]:
+                quarter_num = config.num_hidden_layers // 4
                 self.cross_flag = self.cross_flag and (layer_idx < (config.num_hidden_layers - quarter_num)  )
-            else: raise
+            elif self.geo_inject_version in ["da3_sgf_baseline", "da3_msgf_base", "da3_hmsgf"]:
+                stage_ranges = compute_stage_ranges(config.num_hidden_layers, "msgf", config)
+                self.cross_flag = self.cross_flag and (layer_idx <= stage_ranges.active_end)
+            elif self.geo_inject_version in ["da3_rmsgf"]:
+                stage_ranges = compute_stage_ranges(config.num_hidden_layers, "rmsgf", config)
+                self.cross_flag = self.cross_flag and (layer_idx <= stage_ranges.active_end)
+            else:
+                raise ValueError(f"Unsupported geo_inject_version: {self.geo_inject_version}")
 
             if self.cross_flag:
                 self.cross_attn = QWEN2_5_VL_GEOMETRY_ATTENTION_CLASSES[self.geo_inject_version](

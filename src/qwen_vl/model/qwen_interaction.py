@@ -1,388 +1,456 @@
+"""Geometry interaction modules for VGGT and DA3-based variants."""
+
+from __future__ import annotations
+
 import math
+from typing import List, Optional, Sequence, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.utils import is_flash_attn_2_available
 
+from .da3_adapter import DA3Projector
+from .msgf_memory import BiDirectionalMemoryBank, HierarchicalMemoryBank, MemoryRefiner
+from .msgf_utils import FrameLayout, compute_stage_ranges, infer_frame_layout, mean_pool_tokens, safe_topk, split_by_layout
+
 if is_flash_attn_2_available():
-    from flash_attn import flash_attn_varlen_func, flash_attn_func
-    from flash_attn.layers.rotary import apply_rotary_emb
-
+    from flash_attn import flash_attn_func
 else:
-    flash_attn_varlen_func = None
-    apply_rotary_emb = None
-
+    flash_attn_func = None
 
 
 class QwenVGGTInteractionv1(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
         hidden_size = config.hidden_size
-        vggt_dim = hidden_size
         num_heads = config.num_attention_heads
-
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
-        
-        # 1. Query Projector (来自 LLM Hidden State)
-        self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.vggt_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.geo_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        
-        # 2. Key/Value Projector (来自 VGGT)
-        # 注意：VGGT维度可能和LLM不一样，这里做对齐
-        self.k_proj = nn.Linear(vggt_dim, hidden_size, bias=False)
-        self.v_proj = nn.Linear(vggt_dim, hidden_size, bias=False)
-        
+        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.gate = nn.Parameter(torch.tensor(0.0)) # Tanh Gate
+        self.gate = nn.Parameter(torch.tensor(0.0))
         self.layer_idx = layer_idx
 
-    def forward(self, image_hidden_states, vggt_features):
-        # hidden_states: [Batch, Seq_Len_Text, Hidden]
-        # vggt_features: [Batch, Seq_Len_Image, VGGT_Dim]
+    def forward(self, image_hidden_states, vggt_features, **kwargs):
+        q_input = self.input_layernorm(image_hidden_states)
+        kv_input = self.geo_layernorm(vggt_features)
 
-        # --- Projection ---
-        image_hidden_states = self.input_layernorm(image_hidden_states)
-        vggt_features = self.vggt_layernorm(vggt_features)
+        q = self.q_proj(q_input).view(q_input.shape[0], q_input.shape[1], self.num_heads, self.head_dim)
+        k = self.k_proj(kv_input).view(kv_input.shape[0], kv_input.shape[1], self.num_heads, self.head_dim)
+        v = self.v_proj(kv_input).view(kv_input.shape[0], kv_input.shape[1], self.num_heads, self.head_dim)
 
-        q = self.q_proj(image_hidden_states)
-        k = self.k_proj(vggt_features)
-        v = self.v_proj(vggt_features)
+        if flash_attn_func is not None:
+            attn_output = flash_attn_func(q, k, v, causal=False)
+        else:
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            attn_output = F.scaled_dot_product_attention(q, k, v)
+            attn_output = attn_output.transpose(1, 2)
 
-        # Reshape for Flash Attn: [Batch, Seq, Heads, Dim]
-        q = q.view(q.shape[0], q.shape[1], self.num_heads, self.head_dim)
-        k = k.view(k.shape[0], k.shape[1], self.num_heads, self.head_dim)
-        v = v.view(v.shape[0], v.shape[1], self.num_heads, self.head_dim)
-        
-        # --- Flash Attention (Cross) ---
-        # Flash Attn 自动处理 Q 和 K/V 长度不一致的情况
-        # causal=False (Cross Attention 不需要 causal mask)
-        attn_output = flash_attn_func(q, k, v, causal=False)
-        
-        # Reshape back
         attn_output = attn_output.reshape(image_hidden_states.shape)
-        
-        # --- Output Projection & Gating ---
         attn_output = self.o_proj(attn_output)
-        attn_output = torch.tanh(self.gate) * attn_output
-
-        return attn_output
+        return torch.tanh(self.gate) * attn_output
 
 
-class QwenVGGTInteractionv2(nn.Module):
-    def __init__(self, config, layer_idx=None, use_spatial_bias=True, use_importance_gate=True, geo_learn_bias=True, **kwargs):
+class _FramewiseGeometryInteraction(nn.Module):
+    def __init__(
+        self,
+        config,
+        layer_idx: Optional[int] = None,
+        use_spatial_bias: bool = True,
+        use_importance_gate: bool = True,
+        geo_learn_bias: bool = True,
+        **kwargs,
+    ):
         super().__init__()
-        self.layer_idx = layer_idx
+        self.config = config
+        self.layer_idx = 0 if layer_idx is None else int(layer_idx)
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
-        
         self.use_spatial_bias = use_spatial_bias
         self.learnable_bias = geo_learn_bias
         self.use_importance_gate = use_importance_gate
-        
-        # 假设 pooling stride = 2 (28->14, 36->18)
+        self.msgf_debug = bool(getattr(config, "msgf_debug", False))
+
         if hasattr(config, "vision_config"):
             self.pooling_stride = config.vision_config.spatial_merge_size
-        else: self.pooling_stride = 2
+        else:
+            self.pooling_stride = 2
 
-        depart_smi_token = kwargs.pop("depart_smi_token", False)
-        if depart_smi_token: self.pooling_stride *= kwargs.pop("smi_downsample_rate", 2)
+        if kwargs.pop("depart_smi_token", False):
+            self.pooling_stride *= kwargs.pop("smi_downsample_rate", 2)
 
-        # 1. Norm
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.vggt_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-        # 2. Projectors
+        self.geo_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.gate = nn.Parameter(torch.tensor(0.0))
 
-        # 3. [理念3] 背景抑制
         if self.use_importance_gate:
             self.importance_net = nn.Sequential(
                 nn.Linear(config.hidden_size, config.hidden_size // 4),
                 nn.ReLU(),
-                nn.Linear(config.hidden_size // 4, 1), 
-                nn.Sigmoid()
+                nn.Linear(config.hidden_size // 4, 1),
+                nn.Sigmoid(),
             )
+        else:
+            self.importance_net = None
 
-        self.gate = nn.Parameter(torch.tensor(0.0))
-
-        # 5. [理念2] 空间偏置系数
         self.bias_gate = nn.Sequential(
-            nn.Linear(config.hidden_size, config.num_attention_heads // 2), # 为每个 head 生成独立的 gate
-            nn.Sigmoid()
+            nn.Linear(config.hidden_size, max(config.num_attention_heads // 2, 1)),
+            nn.Sigmoid(),
         )
 
-    def get_spatial_bias(self, h_feat, w_feat, device, dtype):
-        """
-        生成单张特征图的 Bias 矩阵: [N, N], 其中 N = h_feat * w_feat
-        """
+        memory_heads = max(1, min(self.num_heads, 8))
+        self.memory_norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.memory_attn = nn.MultiheadAttention(
+            embed_dim=config.hidden_size,
+            num_heads=memory_heads,
+            batch_first=True,
+        )
+        self.memory_gate = nn.Parameter(torch.tensor(0.0))
+        self.geo_projector = DA3Projector(config.hidden_size, config.hidden_size)
+        self.query_mixer = nn.Sequential(
+            nn.Linear(config.hidden_size * 2, config.hidden_size),
+            nn.GELU(),
+            nn.Linear(config.hidden_size, config.hidden_size),
+        )
+
+    def get_spatial_bias(self, h_feat: int, w_feat: int, device, dtype) -> torch.Tensor:
         y = torch.arange(h_feat, device=device, dtype=dtype)
         x = torch.arange(w_feat, device=device, dtype=dtype)
-        grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
-        
-        # [N, 2]
+        grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
         coords = torch.stack([grid_y.flatten(), grid_x.flatten()], dim=-1)
-        
-        # [N, N]
         dist_matrix = torch.cdist(coords, coords, p=2)
-        
-        # 归一化: 除以对角线长度，让距离在 0~1 之间比较合理
         diag_len = math.sqrt(h_feat**2 + w_feat**2) + 1e-6
-        dist_matrix = dist_matrix / diag_len
-        
-        # Bias = -dist * scale
-        return -dist_matrix 
+        return -(dist_matrix / diag_len)
 
-    def forward(self, semantic_hidden, vggt_features, grid_thw, **kwargs):
-        """
-        semantic_hidden: [B(1), Total_Seq(8064), Dim]
-        vggt_features:   [B(1), Total_Seq(8064), Dim]
-        grid_thw:        [Batch, 3] -> 这里的 H, W 是原始图片大小 (28, 36)
-        """
-        # Norm First
-        semantic_hidden = self.input_layernorm(semantic_hidden)
-        vggt_features = self.vggt_layernorm(vggt_features)
-        
-        # 获取原始 Batch 和 Total_Seq
-        B_orig, S_total, D = semantic_hidden.shape
-        
-        # === 核心修改：处理多图 Batching ===
-        # 默认按照 sequence 处理 (fallback)
-        q_input = semantic_hidden
-        k_input = vggt_features
-        v_input = vggt_features
-        
-        # 记录是否进行了 reshape，以便最后还原
-        is_reshaped = False 
-        h_feat, w_feat = 0, 0
+    def _build_layout(self, total_tokens: int, grid_thw: Optional[torch.Tensor]) -> FrameLayout:
+        return infer_frame_layout(total_tokens=total_tokens, grid_thw=grid_thw, pooling_stride=self.pooling_stride)
 
-        ## spatial bias here
-        if grid_thw is not None:
-            # 获取原始 H, W (28, 36)
-            H_orig, W_orig = grid_thw[0, 1].item(), grid_thw[0, 2].item()
-            
-            # 计算 Pooling 后的特征图尺寸 (14, 18)
-            h_feat = H_orig // self.pooling_stride
-            w_feat = W_orig // self.pooling_stride
-            tokens_per_img = h_feat * w_feat
-            
-            # 检查能否整除，确保对齐
-            if S_total % tokens_per_img == 0:
-                num_images = S_total // tokens_per_img
-                
-                # [关键操作] 重塑维度:
-                # [1, 8064, D] -> [32, 252, D]
-                # 这样每张图只和自己做 Attention，这也是一种极致的“Locality”
-                #tokens_per_img = vggt_features.numel() // (num_images * D)
-                #tokens_per_img = vggt_features.numel() // (num_images * D)
-                #tokens_per_img_q = semantic_hidden.numel() // (num_images * D)
-                q_input = semantic_hidden.view(num_images, tokens_per_img, D)
-                k_input = vggt_features.view(num_images, tokens_per_img, D)
-                v_input = vggt_features.view(num_images, tokens_per_img, D)
-                is_reshaped = True
-                
-                # 更新当前的 Batch 和 Seq
-                B, S = num_images, tokens_per_img
-            else:
-                # 如果对不齐（可能有padding token），则退回原始维度
-                B, S = B_orig, S_total
-        else:
-            B, S = B_orig, S_total
+    def _split_frames(self, hidden_states: torch.Tensor, layout: FrameLayout) -> List[torch.Tensor]:
+        return split_by_layout(hidden_states, layout)
 
-        # === 投影 ===
-        q = self.q_proj(q_input).view(B, S, self.num_heads, self.head_dim)
-        k = self.k_proj(k_input).view(B, S, self.num_heads, self.head_dim)
-        v = self.v_proj(v_input).view(B, S, self.num_heads, self.head_dim)
+    def _build_attn_bias(
+        self,
+        q_input: torch.Tensor,
+        k_input: torch.Tensor,
+        frame_shape: Tuple[int, int],
+    ) -> Optional[torch.Tensor]:
+        q_len = q_input.shape[1]
+        k_len = k_input.shape[1]
+        attn_bias = None
 
-        # Transpose: [B, Heads, S, S]
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        
-        # Attention Score
-        attn_weights = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        
-        # === [理念2] 空间偏置 (现在只需计算单张图的) ===
-        if self.use_spatial_bias and is_reshaped:
-            spatial_bias = self.get_spatial_bias(h_feat, w_feat, q.device, q.dtype)
+        if self.use_spatial_bias and q_len == k_len and frame_shape[0] * frame_shape[1] == q_len:
+            spatial_bias = self.get_spatial_bias(frame_shape[0], frame_shape[1], q_input.device, q_input.dtype)
+            gate_score = self.bias_gate(k_input).transpose(1, 2).unsqueeze(-1)
+            head_bias = torch.zeros(
+                q_input.shape[0], self.num_heads, q_len, k_len, device=q_input.device, dtype=q_input.dtype
+            )
+            split_idx = max(self.num_heads // 2, 1)
+            head_bias[:, :split_idx] = spatial_bias.unsqueeze(0).unsqueeze(0) * gate_score[:, :split_idx]
+            attn_bias = head_bias
 
-            gate_score = self.bias_gate(q_input)
-            gate_score = gate_score.transpose(1, 2).unsqueeze(-1)
+        if self.use_importance_gate and self.importance_net is not None:
+            importance = self.importance_net(k_input)
+            importance_logit = torch.log(importance + 0.1).view(k_input.shape[0], 1, 1, k_len)
+            attn_bias = importance_logit if attn_bias is None else attn_bias + importance_logit
 
-            n_heads = self.num_heads
-            split_idx = n_heads // 2
+        return attn_bias
 
-            attn_weights[:, :split_idx, :, :] += spatial_bias * gate_score
+    def _frame_attention(
+        self,
+        q_tokens: torch.Tensor,
+        kv_tokens: torch.Tensor,
+        frame_shape: Tuple[int, int],
+    ) -> torch.Tensor:
+        if q_tokens.numel() == 0:
+            return q_tokens
+        if kv_tokens.numel() == 0:
+            return torch.zeros_like(q_tokens)
 
-        if self.use_importance_gate:
-            importance = self.importance_net(q_input) # 使用 vggt feature 判断
+        q_input = self.input_layernorm(q_tokens).unsqueeze(0)
+        k_input = self.geo_layernorm(kv_tokens).unsqueeze(0)
 
-            # importance_logit = torch.log(importance + 1e-6)
-            importance_logit = torch.log(importance + 0.1)
+        bsz = q_input.shape[0]
+        q_len = q_input.shape[1]
+        k_len = k_input.shape[1]
 
-            importance_logit = importance_logit.view(B, 1, 1, S)
-            attn_weights = attn_weights + importance_logit
+        q = self.q_proj(q_input).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(k_input).view(bsz, k_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(k_input).view(bsz, k_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-
-        attn_probs = F.softmax(attn_weights, dim=-1)
-
-        output = attn_probs @ v # [B, Heads, S, Head_Dim]
-        
-        # === 还原维度 ===
-        output = output.transpose(1, 2).reshape(B, S, D)
-        
-        if is_reshaped:
-            # [32, 252, D] -> [1, 8064, D]
-            output = output.view(B_orig, S_total, D)
-
-        output = self.o_proj(output)
+        attn_bias = self._build_attn_bias(q_input, k_input, frame_shape)
+        output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
+        output = output.transpose(1, 2).contiguous().reshape(bsz, q_len, self.hidden_size)
+        output = self.o_proj(output).squeeze(0)
         return torch.tanh(self.gate) * output
+
+    def _local_frame_fusion(
+        self,
+        semantic_hidden: torch.Tensor,
+        geo_hidden: torch.Tensor,
+        grid_thw: Optional[torch.Tensor],
+    ):
+        image_layout = self._build_layout(semantic_hidden.shape[1], grid_thw)
+        geo_layout = self._build_layout(geo_hidden.shape[1], grid_thw)
+        image_frames = self._split_frames(semantic_hidden, image_layout)
+        geo_frames = self._split_frames(geo_hidden, geo_layout)
+
+        if len(image_frames) != len(geo_frames):
+            image_layout = FrameLayout([semantic_hidden.shape[1]], [(semantic_hidden.shape[1], 1)])
+            geo_layout = FrameLayout([geo_hidden.shape[1]], [(geo_hidden.shape[1], 1)])
+            image_frames = self._split_frames(semantic_hidden, image_layout)
+            geo_frames = self._split_frames(geo_hidden, geo_layout)
+
+        outputs = []
+        for frame_idx, image_tokens in enumerate(image_frames):
+            geo_tokens = geo_frames[frame_idx] if frame_idx < len(geo_frames) else geo_frames[-1]
+            frame_shape = image_layout.frame_shapes[min(frame_idx, len(image_layout.frame_shapes) - 1)]
+            outputs.append(self._frame_attention(image_tokens, geo_tokens, frame_shape))
+
+        if outputs:
+            local_delta = torch.cat(outputs, dim=0).unsqueeze(0)
+        else:
+            local_delta = torch.zeros_like(semantic_hidden)
+        return local_delta, image_layout, image_frames, geo_frames
+
+    def _build_frame_query(
+        self,
+        frame_tokens: torch.Tensor,
+        text_hidden_states: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        frame_summary = mean_pool_tokens(frame_tokens)
+        if text_hidden_states is None or text_hidden_states.numel() == 0:
+            return frame_summary
+
+        if text_hidden_states.dim() == 3:
+            text_hidden_states = text_hidden_states.squeeze(0)
+        text_summary = mean_pool_tokens(text_hidden_states)
+        return self.query_mixer(torch.cat([frame_summary, text_summary], dim=-1))
+
+    def _select_frame_atoms(
+        self,
+        frame_tokens: torch.Tensor,
+        geo_tokens: Optional[torch.Tensor],
+        top_r: int,
+    ) -> torch.Tensor:
+        if frame_tokens.numel() == 0:
+            return frame_tokens
+
+        if self.use_importance_gate and self.importance_net is not None:
+            scores = self.importance_net(self.input_layernorm(frame_tokens).unsqueeze(0)).squeeze(0).squeeze(-1)
+        else:
+            scores = frame_tokens.norm(dim=-1)
+        _, token_indices = safe_topk(scores, top_r)
+        if token_indices.numel() == 0:
+            return frame_tokens[:0]
+
+        atoms = frame_tokens[token_indices]
+        if geo_tokens is not None and geo_tokens.numel() > 0:
+            if geo_tokens.shape[0] == frame_tokens.shape[0]:
+                geo_atoms = geo_tokens[token_indices.clamp(max=geo_tokens.shape[0] - 1)]
+            else:
+                geo_atoms = mean_pool_tokens(geo_tokens).expand_as(atoms)
+            atoms = 0.5 * (atoms + self.geo_projector(geo_atoms))
+        return atoms
+
+    def _memory_update(self, frame_tokens: torch.Tensor, context_tokens: torch.Tensor) -> torch.Tensor:
+        if context_tokens is None or context_tokens.numel() == 0:
+            return torch.zeros_like(frame_tokens)
+
+        query = self.memory_norm(frame_tokens).unsqueeze(0)
+        context = self.memory_norm(context_tokens).unsqueeze(0)
+        update, _ = self.memory_attn(query, context, context)
+        return torch.tanh(self.memory_gate) * update.squeeze(0)
+
+    def _log_memory_stats(self, tag: str, available_frames: int, available_atoms: int, frame_topk: int, atom_topk: int):
+        if not self.msgf_debug:
+            return
+        print(
+            f"[MSGF] layer={self.layer_idx} stage={tag} "
+            f"available_frames={available_frames} available_atoms={available_atoms} "
+            f"frame_topk={frame_topk} atom_topk={atom_topk}"
+        )
+
+
+class QwenVGGTInteractionv2(_FramewiseGeometryInteraction):
+    def forward(self, semantic_hidden, vggt_features, grid_thw=None, **kwargs):
+        local_delta, _, _, _ = self._local_frame_fusion(semantic_hidden, vggt_features, grid_thw)
+        return local_delta
 
 
 class QwenVGGTInteractionv2Flash(QwenVGGTInteractionv2):
+    pass
 
-    def forward(self, semantic_hidden, vggt_features, grid_thw, **kwargs):
-        # Norm
-        semantic_hidden = self.input_layernorm(semantic_hidden)
-        vggt_features = self.vggt_layernorm(vggt_features)
-        
-        B_orig, S_total, D = semantic_hidden.shape
-        
-        # === Batching Strategy ===
-        q_input, k_input, v_input = semantic_hidden, vggt_features, vggt_features
-        is_reshaped = False 
-        h_feat, w_feat = 0, 0
 
-        # ... (保持原本的 Reshape 逻辑) ...
-        if grid_thw is not None:
-            H_orig, W_orig = grid_thw[0, 1].item(), grid_thw[0, 2].item()
-            h_feat = H_orig // self.pooling_stride
-            w_feat = W_orig // self.pooling_stride
-            tokens_per_img = h_feat * w_feat
-            
-            if tokens_per_img > 0 and S_total % tokens_per_img == 0:
-                num_images = S_total // tokens_per_img
-                tokens_per_img = vggt_features.numel() // (num_images * D)
-                tokens_per_img_q = semantic_hidden.numel() // (num_images * D)
-                q_input = semantic_hidden.view(num_images, tokens_per_img_q, D)
-                k_input = vggt_features.view(num_images, tokens_per_img, D)
-                v_input = vggt_features.view(num_images, tokens_per_img, D)
-                S = q_input.shape[1]
-                S_k = k_input.shape[1]
-                is_reshaped = True
-                #B, S = num_images, tokens_per_img
-                B=num_images
+class QwenDA3SGFBaseline(QwenVGGTInteractionv2Flash):
+    """DA3 + SGF baseline. Kept as a named alias for script switching."""
+
+
+class QwenDA3MSGFBase(_FramewiseGeometryInteraction):
+    def __init__(self, config, layer_idx=None, **kwargs):
+        super().__init__(config, layer_idx=layer_idx, **kwargs)
+        self.stage_ranges = compute_stage_ranges(config.num_hidden_layers, "msgf", config)
+        self.msgf_topr = int(getattr(config, "msgf_topr", 32))
+        self.msgf_frame_topk_max = int(getattr(config, "msgf_frame_topk_max", 3))
+        self.msgf_atom_topk_max = int(getattr(config, "msgf_atom_topk_max", 8))
+
+    def forward(self, semantic_hidden, vggt_features, grid_thw=None, text_hidden_states=None, **kwargs):
+        local_delta, layout, _, geo_frames = self._local_frame_fusion(semantic_hidden, vggt_features, grid_thw)
+        fused_hidden = semantic_hidden + local_delta
+        fused_frames = self._split_frames(fused_hidden, layout)
+
+        if self.layer_idx <= self.stage_ranges.warmup_end:
+            return local_delta
+
+        frame_atoms = [
+            self._select_frame_atoms(frame_tokens, geo_tokens, self.msgf_topr)
+            for frame_tokens, geo_tokens in zip(fused_frames, geo_frames)
+        ]
+        bank = BiDirectionalMemoryBank.from_frame_atoms(frame_atoms)
+
+        memory_updates = []
+        frame_topk = 0
+        atom_topk = 0
+        for frame_idx, frame_tokens in enumerate(fused_frames):
+            if self.stage_ranges.write_start <= self.layer_idx <= self.stage_ranges.write_end:
+                context = frame_atoms[frame_idx] if frame_idx < len(frame_atoms) else frame_tokens[:0]
+                frame_topk = 1 if context.numel() > 0 else 0
+                atom_topk = int(context.shape[0]) if context.numel() > 0 else 0
             else:
-                B, S = B_orig, S_total
-        else:
-            B, S = B_orig, S_total
+                query = self._build_frame_query(frame_tokens, text_hidden_states)
+                retrieved = bank.retrieve(query, self.msgf_frame_topk_max, self.msgf_atom_topk_max)
+                context = retrieved.context
+                frame_topk = max(frame_topk, retrieved.frame_topk)
+                atom_topk = max(atom_topk, retrieved.atom_topk)
+            memory_updates.append(self._memory_update(frame_tokens, context))
 
-        # === Projections ===
-        # SDPA 期望的输入维度是 [Batch, Heads, Seq, Head_Dim]
-        B = q_input.shape[0]
-        Sq = q_input.shape[1]          # query length
-        Sk = k_input.shape[1]          # key/value length    
-        q = self.q_proj(q_input).view(B, Sq, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(k_input).view(B, Sk, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(v_input).view(B, Sk, self.num_heads, self.head_dim).transpose(1, 2)
+        self._log_memory_stats(
+            tag="msgf",
+            available_frames=len(frame_atoms),
+            available_atoms=bank.total_atoms,
+            frame_topk=frame_topk,
+            atom_topk=atom_topk,
+        )
+        return local_delta + torch.cat(memory_updates, dim=0).unsqueeze(0)
 
-        # === 核心修改：构建 Attention Bias ===
-        attn_bias = None
 
-        if self.use_spatial_bias and is_reshaped:
-            # gate_score: [B, S, Heads] -> [B, Heads, S, 1] 为了广播
-            # import pdb
-            # pdb.set_trace()
+class QwenDA3HMSGF(_FramewiseGeometryInteraction):
+    def __init__(self, config, layer_idx=None, **kwargs):
+        super().__init__(config, layer_idx=layer_idx, **kwargs)
+        self.stage_ranges = compute_stage_ranges(config.num_hidden_layers, "hmsgf", config)
+        self.hmsgf_frame_topk_max = int(getattr(config, "hmsgf_frame_topk_max", 3))
+        self.hmsgf_region_topr = int(getattr(config, "hmsgf_region_topr", 32))
+        self.hmsgf_region_topk_max = int(getattr(config, "hmsgf_region_topk_max", 8))
 
-            gate_score = self.bias_gate(k_input).transpose(1, 2).unsqueeze(-1)
-            
-            # spatial_bias: [S, S]
-            spatial_bias = self.get_spatial_bias(h_feat, w_feat, q.device, q.dtype)
+    def forward(self, semantic_hidden, vggt_features, grid_thw=None, text_hidden_states=None, **kwargs):
+        local_delta, layout, _, geo_frames = self._local_frame_fusion(semantic_hidden, vggt_features, grid_thw)
+        fused_hidden = semantic_hidden + local_delta
+        fused_frames = self._split_frames(fused_hidden, layout)
 
-            head_specific_bias = torch.zeros(B, self.num_heads, S, S, 
-                                           device=q.device, dtype=q.dtype)
+        if self.layer_idx <= self.stage_ranges.warmup_end:
+            return local_delta
 
-            n_heads = self.num_heads
-            split_idx = n_heads // 2
-            
-            # Combine: [B, Heads, S, S]
-            # 注意：这里会产生显存开销，构建了一个完整的 Attention Map 大小的 Bias
-            head_specific_bias[:, :split_idx, :, :] += spatial_bias * gate_score
-            
-            attn_bias = head_specific_bias
+        region_atoms = [
+            self._select_frame_atoms(frame_tokens, geo_tokens, self.hmsgf_region_topr)
+            for frame_tokens, geo_tokens in zip(fused_frames, geo_frames)
+        ]
+        bank = HierarchicalMemoryBank.from_frame_atoms(region_atoms)
 
-        # 2. Importance Gate Bias
-        if self.use_importance_gate:
-            importance = self.importance_net(q_input)
-            importance_logit = torch.log(importance + 0.1) # [B, S, 1]
-            
-            mask_term = importance_logit.view(B, 1, 1, S)
-            
-            if attn_bias is None:
-                attn_bias = mask_term
+        memory_updates = []
+        frame_topk = 0
+        region_topk = 0
+        for frame_idx, frame_tokens in enumerate(fused_frames):
+            if self.stage_ranges.write_start <= self.layer_idx <= self.stage_ranges.write_end:
+                own_atoms = region_atoms[frame_idx] if frame_idx < len(region_atoms) else frame_tokens[:0]
+                own_summary = mean_pool_tokens(own_atoms) if own_atoms.numel() > 0 else frame_tokens[:1]
+                context = torch.cat([own_summary, own_atoms], dim=0) if own_atoms.numel() > 0 else own_summary
+                frame_topk = 1
+                region_topk = max(region_topk, int(own_atoms.shape[0]))
             else:
-                attn_bias = attn_bias + mask_term
+                query = self._build_frame_query(frame_tokens, text_hidden_states)
+                retrieved = bank.retrieve(query, self.hmsgf_frame_topk_max, self.hmsgf_region_topk_max)
+                context = retrieved.context
+                frame_topk = max(frame_topk, retrieved.frame_topk)
+                region_topk = max(region_topk, retrieved.atom_topk)
+            memory_updates.append(self._memory_update(frame_tokens, context))
 
-            # import pdb
-            # pdb.set_trace()
-
-            ### visual
-            if False:
-                import os, time
-
-                # [3, 3, 392, 518]
-                # [1, 576, 2560]
-                # [ 1, 24, 32]
-
-                save_root = "/home/ma-user/work/l30081110/VGLLM/visual/qwen3vl/gate/vsibench"
-                os.makedirs(save_root, exist_ok=True)
-
-                folder_names = os.listdir(save_root)
-                folder_names.sort(key=lambda x: int(x))
-
-                if len(folder_names) == 0:
-                    os.makedirs(os.path.join(save_root, "1"))
-                    save_path = os.path.join(save_root, "1", str(self.layer_idx)+".pth")
-                elif os.path.exists(os.path.join(save_root, folder_names[-1], str(self.layer_idx)+".pth")):
-                    target_folder_name = str( int(folder_names[-1]) + 1 )
-                    save_path = os.path.join(save_root, target_folder_name, str(self.layer_idx)+".pth")
-                    os.makedirs("/".join(save_path.split("/")[:-1]), exist_ok=True)
-                else:
-                    save_path = os.path.join(save_root, folder_names[-1], str(self.layer_idx)+".pth")
-                
-                torch.save({
-                    "importance": importance.cpu(),
-                    "grid_thw": grid_thw.cpu(),
-                }, save_path)
-
-                # time.sleep(1)
-
-        # 假设 q,k,v 已经是 [B, heads, Sq, head_dim] / [B, heads, Sk, head_dim]
-        Sq = q.size(-2)   # 63
-        Sk = k.size(-2)   # 285
-
-        if attn_bias is not None and attn_bias.dim() == 4:
-            # 期望最后一维是 key_len=Sk
-            if attn_bias.size(-1) != Sk:
-                # 先用“全零 bias”替代，等价于不mask，先跑通
-                attn_bias = attn_bias.new_zeros((attn_bias.size(0), 1, 1, Sk))
-        # === Flash Attention (SDPA) ===
-        # PyTorch 2.0+ 会自动选择最优 kernel (FlashAttn, MemEfficient, or Math)
-        # 传入 attn_mask 即等同于在 Softmax 之前加上这个 Tensor
-        output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
-
-        # === Output Projection ===
-        output = output.transpose(1, 2).contiguous().reshape(B, S, self.hidden_size)
-        
-        if is_reshaped:
-            output = output.view(B_orig, S_total, self.hidden_size)
-
-        output = self.o_proj(output)
-        return torch.tanh(self.gate) * output
+        total_regions = sum(int(atoms.shape[0]) for atoms in region_atoms)
+        self._log_memory_stats(
+            tag="hmsgf",
+            available_frames=len(region_atoms),
+            available_atoms=total_regions,
+            frame_topk=frame_topk,
+            atom_topk=region_topk,
+        )
+        return local_delta + torch.cat(memory_updates, dim=0).unsqueeze(0)
 
 
+class QwenDA3RMSGF(_FramewiseGeometryInteraction):
+    def __init__(self, config, layer_idx=None, **kwargs):
+        super().__init__(config, layer_idx=layer_idx, **kwargs)
+        self.stage_ranges = compute_stage_ranges(config.num_hidden_layers, "rmsgf", config)
+        self.rmsgf_topr = int(getattr(config, "rmsgf_topr", 32))
+        self.rmsgf_atom_topk_max = int(getattr(config, "rmsgf_atom_topk_max", 8))
+        self.refiner = MemoryRefiner(
+            hidden_size=config.hidden_size,
+            use_gate=bool(getattr(config, "rmsgf_refine_gate", True)),
+            residual=bool(getattr(config, "rmsgf_refine_residual", True)),
+        )
+
+    def forward(self, semantic_hidden, vggt_features, grid_thw=None, text_hidden_states=None, **kwargs):
+        local_delta, layout, _, geo_frames = self._local_frame_fusion(semantic_hidden, vggt_features, grid_thw)
+        fused_hidden = semantic_hidden + local_delta
+        fused_frames = self._split_frames(fused_hidden, layout)
+
+        if self.layer_idx <= self.stage_ranges.warmup_end:
+            return local_delta
+
+        init_atoms = [
+            self._select_frame_atoms(frame_tokens, geo_tokens, self.rmsgf_topr)
+            for frame_tokens, geo_tokens in zip(fused_frames, geo_frames)
+        ]
+
+        if self.stage_ranges.init_start <= self.layer_idx <= self.stage_ranges.init_end:
+            memory_updates = [self._memory_update(frame_tokens, atoms) for frame_tokens, atoms in zip(fused_frames, init_atoms)]
+            total_atoms = sum(int(atoms.shape[0]) for atoms in init_atoms)
+            self._log_memory_stats("rmsgf_init", len(init_atoms), total_atoms, 1, self.rmsgf_topr)
+            return local_delta + torch.cat(memory_updates, dim=0).unsqueeze(0)
+
+        refined_atoms = []
+        for frame_tokens, geo_tokens, atoms in zip(fused_frames, geo_frames, init_atoms):
+            if atoms.numel() == 0:
+                refined_atoms.append(atoms)
+                continue
+            frame_summary = self._build_frame_query(frame_tokens, text_hidden_states)
+            geo_summary = mean_pool_tokens(geo_tokens) if geo_tokens.numel() > 0 else frame_summary
+            refined_atoms.append(self.refiner(atoms, frame_summary + geo_summary))
+
+        bank = BiDirectionalMemoryBank.from_frame_atoms(refined_atoms)
+        memory_updates = []
+        atom_topk = 0
+        for frame_tokens in fused_frames:
+            query = self._build_frame_query(frame_tokens, text_hidden_states)
+            retrieved = bank.retrieve(query, frame_topk_max=len(refined_atoms), atom_topk_max=self.rmsgf_atom_topk_max)
+            atom_topk = max(atom_topk, retrieved.atom_topk)
+            memory_updates.append(self._memory_update(frame_tokens, retrieved.context))
+
+        self._log_memory_stats(
+            tag="rmsgf_refine",
+            available_frames=len(refined_atoms),
+            available_atoms=bank.total_atoms,
+            frame_topk=len(refined_atoms),
+            atom_topk=atom_topk,
+        )
+        return local_delta + torch.cat(memory_updates, dim=0).unsqueeze(0)
