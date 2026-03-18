@@ -1,0 +1,17 @@
+[
+  {
+    "id": "smoke_llava_hound_0001",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "<video>\nDescribe the visual differences across these frames."
+      },
+      {
+        "from": "gpt",
+        "value": "The clip contains four colored frames with different labels and background colors."
+      }
+    ],
+    "data_source": "llava_hound",
+    "video": "llava_hound/frames/smoke_clip_0001"
+  }
+]

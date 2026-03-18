@@ -1,0 +1,21 @@
+[
+  {
+    "id": "smoke_scene0000_00_0001",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "<image>\n<image>\n<image>\nWhich marked object appears deepest? Answer with one short phrase."
+      },
+      {
+        "from": "gpt",
+        "value": "The blue point appears deepest."
+      }
+    ],
+    "images": [
+      "spar/scannet/images/scene0000_00/image_color/2626.jpg",
+      "spar/scannet/images/scene0000_00/image_color/3321.jpg",
+      "spar/scannet/images/scene0000_00/image_color/133.jpg"
+    ],
+    "spar_info": "{\"red_point\": [[120, 96]], \"blue_point\": [[320, 320]], \"green_point\": [[220, 160]], \"point_img_idx\": [[0, 1, 2]], \"type\": \"depth_prediction_oo_mv\"}"
+  }
+]
