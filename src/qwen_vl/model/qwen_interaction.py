@@ -13,6 +13,9 @@ from transformers.utils import is_flash_attn_2_available
 from .da3_adapter import DA3Projector
 from .msgf_memory import BiDirectionalMemoryBank, HierarchicalMemoryBank, MemoryRefiner
 from .msgf_utils import FrameLayout, compute_stage_ranges, infer_frame_layout, mean_pool_tokens, safe_topk, split_by_layout
+from .mmr_memory import FrameMemoryBank, RegionMemoryBank
+from .mmr_retriever import QueryDrivenMMRRetriever
+from .mmr_utils import compute_mmr_stage_ranges
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func
@@ -452,5 +455,136 @@ class QwenDA3RMSGF(_FramewiseGeometryInteraction):
             available_atoms=bank.total_atoms,
             frame_topk=len(refined_atoms),
             atom_topk=atom_topk,
+        )
+        return local_delta + torch.cat(memory_updates, dim=0).unsqueeze(0)
+
+
+class QwenDA3MMRInteraction(_FramewiseGeometryInteraction):
+    """Candidate D: retain DA3 cross-attention and replace SGF gating with explicit retrieval."""
+
+    def __init__(self, config, layer_idx=None, **kwargs):
+        super().__init__(
+            config,
+            layer_idx=layer_idx,
+            use_spatial_bias=False,
+            use_importance_gate=False,
+            **kwargs,
+        )
+        self.stage_ranges = compute_mmr_stage_ranges(config.num_hidden_layers, config)
+        self.mmr_debug = bool(getattr(config, "mmr_debug", False))
+        self.mmr_use_region_memory = bool(getattr(config, "mmr_use_region_memory", False))
+        self.mmr_frame_topk_max = int(getattr(config, "mmr_frame_topk_max", 3))
+        self.mmr_region_topk_max = int(getattr(config, "mmr_region_topk_max", 8))
+        self.mmr_use_view_continuity = bool(getattr(config, "mmr_use_view_continuity", True))
+        self.mmr_use_temporal_continuity = bool(getattr(config, "mmr_use_temporal_continuity", True))
+        self.mmr_region_atoms_per_frame = int(getattr(config, "mmr_region_atoms_per_frame", 8))
+        self.mmr_query_use_text = bool(getattr(config, "mmr_query_use_text", True))
+        self.mmr_query_use_visual_summary = bool(getattr(config, "mmr_query_use_visual_summary", True))
+        self.mmr_memory_dim = int(getattr(config, "mmr_memory_dim", config.hidden_size) or config.hidden_size)
+        self.mmr_query_proj = nn.Sequential(
+            nn.Linear(config.hidden_size * 2, self.mmr_memory_dim),
+            nn.GELU(),
+            nn.Linear(self.mmr_memory_dim, config.hidden_size),
+        )
+        self.retriever = QueryDrivenMMRRetriever(
+            frame_topk_max=self.mmr_frame_topk_max,
+            region_topk_max=self.mmr_region_topk_max,
+            use_view_continuity=self.mmr_use_view_continuity,
+            use_temporal_continuity=self.mmr_use_temporal_continuity,
+        )
+
+    def _mmr_query(self, frame_tokens: torch.Tensor, text_hidden_states: Optional[torch.Tensor]) -> torch.Tensor:
+        query_parts = []
+        if self.mmr_query_use_visual_summary:
+            query_parts.append(mean_pool_tokens(frame_tokens))
+        else:
+            query_parts.append(frame_tokens[:1].new_zeros((1, frame_tokens.shape[-1])))
+
+        if self.mmr_query_use_text and text_hidden_states is not None and text_hidden_states.numel() > 0:
+            if text_hidden_states.dim() == 3:
+                text_hidden_states = text_hidden_states.squeeze(0)
+            query_parts.append(mean_pool_tokens(text_hidden_states))
+        else:
+            query_parts.append(query_parts[0].new_zeros(query_parts[0].shape))
+
+        return self.mmr_query_proj(torch.cat(query_parts, dim=-1))
+
+    def _log_mmr(self, available_frames: int, available_regions: int, frame_topk: int, region_topk: int):
+        if not (self.mmr_debug or self.msgf_debug):
+            return
+        print(
+            f"[MMR] layer={self.layer_idx} "
+            f"available_frames={available_frames} available_regions={available_regions} "
+            f"frame_topk={frame_topk} region_topk={region_topk}"
+        )
+
+    def forward(
+        self,
+        semantic_hidden,
+        vggt_features,
+        grid_thw=None,
+        text_hidden_states=None,
+        memory_bank=None,
+        frame_ids=None,
+        view_ids=None,
+        **kwargs,
+    ):
+        local_delta, layout, _, geo_frames = self._local_frame_fusion(semantic_hidden, vggt_features, grid_thw)
+        fused_hidden = semantic_hidden + local_delta
+        fused_frames = self._split_frames(fused_hidden, layout)
+
+        if self.layer_idx <= self.stage_ranges.warmup_end:
+            return local_delta
+
+        num_frames = len(fused_frames)
+        if frame_ids is None:
+            frame_ids = list(range(num_frames))
+        elif torch.is_tensor(frame_ids):
+            frame_ids = [int(v) for v in frame_ids.view(-1).tolist()]
+        else:
+            frame_ids = [int(v) for v in frame_ids]
+        if len(frame_ids) < num_frames:
+            frame_ids = frame_ids + list(range(len(frame_ids), num_frames))
+
+        if view_ids is not None and torch.is_tensor(view_ids):
+            view_ids = [int(v) for v in view_ids.view(-1).tolist()]
+
+        frame_summaries = [mean_pool_tokens(frame_tokens) for frame_tokens in fused_frames]
+        frame_bank = FrameMemoryBank.from_summaries(frame_summaries, frame_ids, view_ids=view_ids)
+
+        region_bank = None
+        if self.mmr_use_region_memory:
+            region_atoms = [
+                self._select_frame_atoms(frame_tokens, geo_tokens, self.mmr_region_atoms_per_frame)
+                for frame_tokens, geo_tokens in zip(fused_frames, geo_frames)
+            ]
+            region_bank = RegionMemoryBank.from_atoms(region_atoms, frame_ids, view_ids=view_ids)
+
+        if self.stage_ranges.write_start <= self.layer_idx <= self.stage_ranges.write_end:
+            return local_delta
+
+        memory_updates = []
+        max_frame_topk = 0
+        max_region_topk = 0
+        for frame_idx, frame_tokens in enumerate(fused_frames):
+            query = self._mmr_query(frame_tokens, text_hidden_states)
+            current_view_id = None if view_ids is None or frame_idx >= len(view_ids) else view_ids[frame_idx]
+            retrieved = self.retriever.retrieve(
+                query=query,
+                frame_bank=frame_bank,
+                region_bank=region_bank,
+                current_frame_id=frame_ids[frame_idx],
+                current_view_id=current_view_id,
+                use_region_memory=self.mmr_use_region_memory,
+            )
+            max_frame_topk = max(max_frame_topk, retrieved.frame_topk)
+            max_region_topk = max(max_region_topk, retrieved.region_topk)
+            memory_updates.append(self._memory_update(frame_tokens, retrieved.context))
+
+        self._log_mmr(
+            available_frames=frame_bank.size,
+            available_regions=0 if region_bank is None else region_bank.size,
+            frame_topk=max_frame_topk,
+            region_topk=max_region_topk,
         )
         return local_delta + torch.cat(memory_updates, dim=0).unsqueeze(0)

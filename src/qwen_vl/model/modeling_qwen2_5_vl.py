@@ -55,6 +55,7 @@ from .feature_fusion import FeatureFusionModule, FeatureFusionConfig, GeometryFe
 from .loss import normalize_pointcloud, check_and_fix_inf_nan
 from .qwen_interaction import *
 from .msgf_utils import compute_stage_ranges
+from .mmr_utils import compute_mmr_stage_ranges
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func, flash_attn_func
@@ -1073,6 +1074,7 @@ QWEN2_5_VL_GEOMETRY_ATTENTION_CLASSES = {
     "da3_msgf_base": QwenDA3MSGFBase,
     "da3_hmsgf": QwenDA3HMSGF,
     "da3_rmsgf": QwenDA3RMSGF,
+    "da3_mmr": QwenDA3MMRInteraction,
 }
 
 
@@ -1108,6 +1110,9 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
                 self.cross_flag = self.cross_flag and (layer_idx <= stage_ranges.active_end)
             elif self.geo_inject_version in ["da3_rmsgf"]:
                 stage_ranges = compute_stage_ranges(config.num_hidden_layers, "rmsgf", config)
+                self.cross_flag = self.cross_flag and (layer_idx <= stage_ranges.active_end)
+            elif self.geo_inject_version in ["da3_mmr"]:
+                stage_ranges = compute_mmr_stage_ranges(config.num_hidden_layers, config)
                 self.cross_flag = self.cross_flag and (layer_idx <= stage_ranges.active_end)
             else:
                 raise ValueError(f"Unsupported geo_inject_version: {self.geo_inject_version}")

@@ -13,6 +13,7 @@ import torch.nn as nn
 class DA3AdapterOutput:
     geo_embeds: torch.Tensor
     image_grid_thw: torch.Tensor
+    geo_frame_splits: Optional[list[int]] = None
     frame_ids: Optional[torch.Tensor] = None
     pose_embeds: Optional[torch.Tensor] = None
     conf_embeds: Optional[torch.Tensor] = None
