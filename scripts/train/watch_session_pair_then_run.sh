@@ -121,7 +121,23 @@ cat > "${RUNNER_SCRIPT}" <<EOF
 #!/bin/bash
 set +e
 source ~/.bashrc >/dev/null 2>&1
-conda activate "${CONDA_ENV}" >/dev/null 2>&1
+if command -v conda >/dev/null 2>&1; then
+    eval "\$(conda shell.bash hook)" >/dev/null 2>&1
+elif [ -x "\${HOME}/.conda/bin/conda" ]; then
+    eval "\$(\"\${HOME}/.conda/bin/conda\" shell.bash hook)" >/dev/null 2>&1
+elif [ -f "\${HOME}/.conda/etc/profile.d/conda.sh" ]; then
+    source "\${HOME}/.conda/etc/profile.d/conda.sh" >/dev/null 2>&1
+elif [ -f "/usr/local/anaconda3/etc/profile.d/conda.sh" ]; then
+    source "/usr/local/anaconda3/etc/profile.d/conda.sh" >/dev/null 2>&1
+fi
+conda activate "${CONDA_ENV}" >/dev/null 2>&1 || {
+    echo "[ERROR] Failed to activate conda env ${CONDA_ENV}." >> "${LOG_FILE}"
+    exit 127
+}
+command -v torchrun >/dev/null 2>&1 || {
+    echo "[ERROR] torchrun not found after activating ${CONDA_ENV}." >> "${LOG_FILE}"
+    exit 127
+}
 cd "${PROJECT_ROOT}"
 export CUDA_VISIBLE_DEVICES="${GPU_PAIR}"
 export NPROC_PER_NODE="${NPROC_PER_NODE}"
