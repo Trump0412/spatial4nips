@@ -15,4 +15,12 @@ else
     EXTRA_TRAIN_ARGS="${BASE_EXTRA_ARGS}"
 fi
 
+export PROJECT_ROOT
+export GEOMETRY_ENCODER_PATH
+export OUTPUT_DIR
+export LOG_DIR
+export TRAIN_LOG
+export GEO_INJECT_VERSION="da3_sgf_baseline"
+export EXTRA_TRAIN_ARGS
+
 exec bash "${SCRIPT_DIR}/train_vanilla_qwen25vl_3b_da3.sh"

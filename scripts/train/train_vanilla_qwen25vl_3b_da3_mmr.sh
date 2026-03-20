@@ -19,4 +19,15 @@ else
     EXTRA_TRAIN_ARGS="${BASE_EXTRA_ARGS}"
 fi
 
+export PROJECT_ROOT
+export VARIANT_NAME
+export MODEL_PATH
+export GEOMETRY_ENCODER_TYPE
+export GEOMETRY_ENCODER_PATH
+export GEO_INJECT_VERSION
+export OUTPUT_DIR
+export LOG_DIR
+export TRAIN_LOG
+export EXTRA_TRAIN_ARGS
+
 exec bash "${SCRIPT_DIR}/train_vanilla_qwen25vl_variant.sh"

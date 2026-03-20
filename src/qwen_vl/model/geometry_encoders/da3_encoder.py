@@ -21,6 +21,9 @@ class DA3Encoder(BaseGeometryEncoder):
         self.use_ray_pose = bool(kwargs.get("use_ray_pose", False))
         self.export_feat_layer = int(kwargs.get("export_feat_layer", -1))
         self._runtime_export_feat_layer = self.export_feat_layer
+        # DA3's depth head contains LayerNorms that are not stable under bf16/fp16 autocast
+        # in our training path. Keep the frozen DA3 branch in fp32 and cast features back later.
+        self.force_fp32 = bool(kwargs.get("force_fp32", True))
         self.default_model_path = "depth-anything/da3-base"
 
         feature_dim_override = kwargs.get("feature_dim")
@@ -73,18 +76,15 @@ class DA3Encoder(BaseGeometryEncoder):
                 return
 
     def _run_da3(self, images_5d: torch.Tensor):
-        self.da3 = self.da3.to(device=images_5d.device)
+        target_dtype = torch.float32 if self.force_fp32 else images_5d.dtype
+        images_5d = images_5d.to(dtype=target_dtype)
+        self.da3 = self.da3.to(device=images_5d.device, dtype=target_dtype)
         self.da3.eval()
 
-        autocast_enabled = images_5d.device.type == "cuda"
-        autocast_dtype = (
-            torch.bfloat16 if (autocast_enabled and torch.cuda.is_bf16_supported()) else torch.float16
-        )
         with torch.no_grad():
             with torch.autocast(
                 device_type=images_5d.device.type,
-                dtype=autocast_dtype,
-                enabled=autocast_enabled,
+                enabled=False,
             ):
                 return self.da3(
                     images_5d,
