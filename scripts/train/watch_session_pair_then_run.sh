@@ -66,6 +66,24 @@ timestamp() {
     date '+%Y-%m-%d %H:%M:%S'
 }
 
+wait_session_is_busy() {
+    if ! tmux has-session -t "${WAIT_SESSION}" 2>/dev/null; then
+        return 1
+    fi
+
+    while read -r pane_dead pane_cmd; do
+        if [ "${pane_dead}" = "1" ]; then
+            continue
+        fi
+        if [ "${pane_cmd}" = "sleep" ]; then
+            continue
+        fi
+        return 0
+    done < <(tmux list-panes -t "${WAIT_SESSION}" -F '#{pane_dead} #{pane_current_command}')
+
+    return 1
+}
+
 pair_is_idle() {
     local pair_csv="$1"
     IFS=',' read -r -a TARGET_GPUS <<< "${pair_csv}"
@@ -84,8 +102,9 @@ pair_is_idle() {
     return 0
 }
 
-echo "[$(timestamp)] Waiting for tmux session '${WAIT_SESSION}' to finish." | tee -a "${LOG_FILE}"
-while tmux has-session -t "${WAIT_SESSION}" 2>/dev/null; do
+echo "[$(timestamp)] Waiting for training session '${WAIT_SESSION}' to finish." | tee -a "${LOG_FILE}"
+echo "[$(timestamp)] A session is considered finished when it disappears or its active pane falls back to 'sleep'." | tee -a "${LOG_FILE}"
+while wait_session_is_busy; do
     sleep "${POLL_INTERVAL_SEC}"
 done
 
