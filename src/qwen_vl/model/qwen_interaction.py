@@ -463,6 +463,8 @@ class QwenDA3MMRInteraction(_FramewiseGeometryInteraction):
     """Candidate D: retain DA3 cross-attention and replace SGF gating with explicit retrieval."""
 
     def __init__(self, config, layer_idx=None, **kwargs):
+        kwargs.pop("use_spatial_bias", None)
+        kwargs.pop("use_importance_gate", None)
         super().__init__(
             config,
             layer_idx=layer_idx,
