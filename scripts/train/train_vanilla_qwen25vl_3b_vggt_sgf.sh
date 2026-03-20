@@ -11,4 +11,13 @@ OUTPUT_DIR=${OUTPUT_DIR:-"${PROJECT_ROOT}/outputs/${VARIANT_NAME}"}
 LOG_DIR=${LOG_DIR:-"${PROJECT_ROOT}/logs/${VARIANT_NAME}"}
 TRAIN_LOG=${TRAIN_LOG:-"${LOG_DIR}/train.log"}
 
+export PROJECT_ROOT
+export VARIANT_NAME
+export MODEL_PATH
+export GEOMETRY_ENCODER_TYPE
+export GEO_INJECT_VERSION
+export OUTPUT_DIR
+export LOG_DIR
+export TRAIN_LOG
+
 exec bash "${SCRIPT_DIR}/train_vanilla_qwen25vl_variant.sh"
