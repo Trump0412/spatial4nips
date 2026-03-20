@@ -128,6 +128,7 @@ def train(attn_implementation="flash_attention_2"):
             from qwen_vl.model.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGenerationWithVGGT
             print(model_args.model_name_or_path)
             config = AutoConfig.from_pretrained(model_args.model_name_or_path)
+            setattr(config, "geometry_encoder_path", model_args.geometry_encoder_path)
             setattr(config, "geo_cross_attn", model_args.geo_cross_attn)
             setattr(config, "geo_inject_version", model_args.geo_inject_version)
             setattr(config, "geo_importance_gate", model_args.geo_importance_gate)
@@ -229,6 +230,7 @@ def train(attn_implementation="flash_attention_2"):
             from qwen_vl.model.qwenvl3.modeling_qwen3_vl import Qwen3VLForConditionalGenerationWithVGGT
             print(model_args.model_name_or_path)
             config = AutoConfig.from_pretrained(model_args.model_name_or_path)
+            setattr(config, "geometry_encoder_path", model_args.geometry_encoder_path)
             setattr(config.text_config, "depart_smi_token", model_args.depart_smi_token)
             setattr(config.text_config, "smi_image_num", model_args.smi_image_num)
             setattr(config.text_config, "smi_downsample_rate", model_args.smi_downsample_rate)
