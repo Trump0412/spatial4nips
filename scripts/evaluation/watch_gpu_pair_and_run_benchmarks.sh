@@ -33,6 +33,7 @@ WATCH_LOG="${PROJECT_ROOT}/logs/watch_${SESSION_NAME}.log"
 RUNNER_SCRIPT="${PROJECT_ROOT}/logs/.run_${SESSION_NAME}.sh"
 OUTPUT_ROOT_DEFAULT="${PROJECT_ROOT}/outputs/eval/${MODEL_TAG}"
 OUTPUT_ROOT=${OUTPUT_ROOT:-"${OUTPUT_ROOT_DEFAULT}"}
+EVAL_LOCK_DIR=${EVAL_LOCK_DIR:-"${PROJECT_ROOT}/logs/.eval_gpu_pair.lock"}
 
 usage() {
     cat <<USAGE
@@ -195,6 +196,12 @@ export NCCL_NVLS_ENABLE=0
 export LMMS_EVAL_LAUNCHER=accelerate
 export CUDA_VISIBLE_DEVICES="${GPU_CSV}"
 
+while ! mkdir "${EVAL_LOCK_DIR}" 2>/dev/null; do
+    sleep 30
+done
+trap 'rm -rf "${EVAL_LOCK_DIR}"' EXIT
+echo "${SESSION_NAME}" > "${EVAL_LOCK_DIR}/owner"
+
 accelerate launch --num_processes=${VSI_NUM_PROCESSES} --main_process_ip 127.0.0.1 --main_process_port ${VSI_MAIN_PROCESS_PORT} -m lmms_eval \
     --verbosity INFO \
     --model geothinker \
@@ -225,5 +232,6 @@ chmod +x "${RUNNER_SCRIPT}"
 echo "[$(timestamp)] Launching '${SESSION_NAME}' on GPUs ${GPU_CSV}." | tee -a "${WATCH_LOG}"
 echo "[$(timestamp)] VSI output: ${VSI_OUTPUT_PATH}" | tee -a "${WATCH_LOG}"
 echo "[$(timestamp)] MMSI output: ${MMSI_OUTPUT_PATH}" | tee -a "${WATCH_LOG}"
+echo "[$(timestamp)] Global eval lock: ${EVAL_LOCK_DIR}" | tee -a "${WATCH_LOG}"
 tmux new-session -d -s "${SESSION_NAME}" "bash '${RUNNER_SCRIPT}'"
 echo "[$(timestamp)] Attach with: tmux attach -t ${SESSION_NAME}" | tee -a "${WATCH_LOG}"
