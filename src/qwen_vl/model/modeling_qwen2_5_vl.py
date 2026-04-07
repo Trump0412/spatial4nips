@@ -1075,6 +1075,7 @@ QWEN2_5_VL_GEOMETRY_ATTENTION_CLASSES = {
     "da3_hmsgf": QwenDA3HMSGF,
     "da3_rmsgf": QwenDA3RMSGF,
     "da3_mmr": QwenDA3MMRInteraction,
+    "da3_new": QwenDA3NewInteraction,
 }
 
 
@@ -1105,7 +1106,7 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
             elif self.geo_inject_version in ["v2","v2_flash", "vggt_sgf_baseline"]:
                 quarter_num = config.num_hidden_layers // 4
                 self.cross_flag = self.cross_flag and (layer_idx < (config.num_hidden_layers - quarter_num)  )
-            elif self.geo_inject_version in ["da3_sgf_baseline", "da3_msgf_base", "da3_hmsgf"]:
+            elif self.geo_inject_version in ["da3_sgf_baseline", "da3_msgf_base", "da3_hmsgf", "da3_new"]:
                 stage_ranges = compute_stage_ranges(config.num_hidden_layers, "msgf", config)
                 self.cross_flag = self.cross_flag and (layer_idx <= stage_ranges.active_end)
             elif self.geo_inject_version in ["da3_rmsgf"]:

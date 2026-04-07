@@ -301,6 +301,15 @@ class QwenDA3SGFBaseline(QwenVGGTInteractionv2Flash):
     """DA3 + SGF baseline. Kept as a named alias for script switching."""
 
 
+class QwenDA3NewInteraction(QwenDA3SGFBaseline):
+    """DA3-new: uses blocks_to_take (local+global) features with SGF interaction.
+
+    The feature extraction change (aux -> blocks_to_take, 1536 -> 3072 dim)
+    is handled by DA3NewEncoder + GeometryFeatureMerger. After merger projection
+    to hidden_size, the cross-attention sees the same dimensionality.
+    """
+
+
 class QwenDA3MSGFBase(_FramewiseGeometryInteraction):
     def __init__(self, config, layer_idx=None, **kwargs):
         super().__init__(config, layer_idx=layer_idx, **kwargs)
