@@ -55,6 +55,9 @@ class ModelArguments:
     rmsgf_refine_start: int = field(default=-1)
     rmsgf_refine_end: int = field(default=-1)
 
+    # ZenView (da3_msgf_temporal_refine) params
+    temporal_bonus_lambda: float = field(default=0.10)
+
     mmr_debug: bool = field(default=False)
     mmr_use_region_memory: bool = field(default=False)
     mmr_frame_topk_max: int = field(default=3)

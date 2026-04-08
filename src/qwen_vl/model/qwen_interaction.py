@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from transformers.utils import is_flash_attn_2_available
 
 from .da3_adapter import DA3Projector
-from .msgf_memory import BiDirectionalMemoryBank, HierarchicalMemoryBank, MemoryRefiner
+from .msgf_memory import BiDirectionalMemoryBank, HierarchicalMemoryBank, MemoryRefiner, _similarity
 from .msgf_utils import FrameLayout, compute_stage_ranges, infer_frame_layout, mean_pool_tokens, safe_topk, split_by_layout
 from .mmr_memory import FrameMemoryBank, RegionMemoryBank
 from .mmr_retriever import QueryDrivenMMRRetriever
@@ -599,3 +599,92 @@ class QwenDA3MMRInteraction(_FramewiseGeometryInteraction):
             region_topk=max_region_topk,
         )
         return local_delta + torch.cat(memory_updates, dim=0).unsqueeze(0)
+
+
+class QwenDA3MSGFTemporalRefine(_FramewiseGeometryInteraction):
+    """MSGF-Base + temporal continuity bonus + lightweight atom refinement.
+
+    Read-stage changes vs MSGF-Base:
+    1. Frame-level retrieval adds temporal_bonus: lambda_t / (1 + |i-j|)
+    2. Candidate atoms are refined by a gated residual MLP before atom-level ranking
+
+    Paper name: Zen Context Memory
+    """
+
+    def __init__(self, config, layer_idx=None, **kwargs):
+        super().__init__(config, layer_idx=layer_idx, **kwargs)
+        self.stage_ranges = compute_stage_ranges(config.num_hidden_layers, "msgf", config)
+        self.msgf_topr = int(getattr(config, "msgf_topr", 32))
+        self.msgf_frame_topk_max = int(getattr(config, "msgf_frame_topk_max", 3))
+        self.msgf_atom_topk_max = int(getattr(config, "msgf_atom_topk_max", 8))
+        self.temporal_bonus_lambda = float(getattr(config, "temporal_bonus_lambda", 0.10))
+        self.refiner = MemoryRefiner(
+            hidden_size=config.hidden_size,
+            use_gate=True,
+            residual=True,
+        )
+
+    def forward(self, semantic_hidden, vggt_features, grid_thw=None, text_hidden_states=None, **kwargs):
+        local_delta, layout, _, geo_frames = self._local_frame_fusion(semantic_hidden, vggt_features, grid_thw)
+        fused_hidden = semantic_hidden + local_delta
+        fused_frames = self._split_frames(fused_hidden, layout)
+
+        if self.layer_idx <= self.stage_ranges.warmup_end:
+            return local_delta
+
+        # Build atoms and memory bank
+        frame_atoms = [
+            self._select_frame_atoms(frame_tokens, geo_tokens, self.msgf_topr)
+            for frame_tokens, geo_tokens in zip(fused_frames, geo_frames)
+        ]
+        frame_summaries = [mean_pool_tokens(atoms) for atoms in frame_atoms if atoms.numel() > 0]
+
+        memory_updates = []
+        frame_topk = 0
+        atom_topk = 0
+
+        for frame_idx, frame_tokens in enumerate(fused_frames):
+            if self.stage_ranges.write_start <= self.layer_idx <= self.stage_ranges.write_end:
+                # Write stage: self-memory update with own atoms
+                context = frame_atoms[frame_idx]
+                frame_topk = 1
+                atom_topk = max(atom_topk, int(context.shape[0]))
+                memory_updates.append(self._memory_update(frame_tokens, context))
+            else:
+                # Read stage: temporal-aware retrieval + atom refinement
+                query = self._build_frame_query(frame_tokens, text_hidden_states)
+
+                # Frame-level coarse retrieval with temporal bonus
+                frame_bank = torch.cat(frame_summaries, dim=0)
+                frame_scores = _similarity(query, frame_bank)
+                for j in range(len(frame_summaries)):
+                    frame_scores[j] = frame_scores[j] + self.temporal_bonus_lambda / (1.0 + abs(frame_idx - j))
+                _, top_frame_indices = safe_topk(frame_scores, self.msgf_frame_topk_max)
+                frame_topk = max(frame_topk, int(top_frame_indices.numel()))
+
+                # Gather candidate atoms from selected frames
+                candidate_frames = [frame_atoms[idx] for idx in top_frame_indices.tolist()]
+                candidate_atoms = torch.cat(candidate_frames, dim=0)
+
+                # Lightweight semantic-geometric atom refinement
+                geo_summary = mean_pool_tokens(geo_frames[frame_idx]) if geo_frames[frame_idx].numel() > 0 else query
+                context_signal = query + geo_summary
+                refined_atoms = self.refiner(candidate_atoms, context_signal)
+
+                # Atom-level fine retrieval on refined atoms
+                atom_scores = _similarity(query, refined_atoms)
+                _, atom_indices = safe_topk(atom_scores, self.msgf_atom_topk_max)
+                selected_atoms = refined_atoms[atom_indices]
+                atom_topk = max(atom_topk, int(atom_indices.numel()))
+
+                memory_updates.append(self._memory_update(frame_tokens, selected_atoms))
+
+        self._log_memory_stats(
+            tag="zenview",
+            available_frames=len(frame_atoms),
+            available_atoms=sum(int(a.shape[0]) for a in frame_atoms),
+            frame_topk=frame_topk,
+            atom_topk=atom_topk,
+        )
+        return local_delta + torch.cat(memory_updates, dim=0).unsqueeze(0)
+
