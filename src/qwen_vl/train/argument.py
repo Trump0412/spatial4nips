@@ -17,7 +17,9 @@ class ModelArguments:
     reference_frame: str = field(default="first")  # Reference frame for geometry encoding ("first", "last"), only available for vggt
     feature_fusion_method: str = field(default="add")  # Method to fuse geometry and visual features ("add", "concat", "cross_attention", "gate")
     fusion_num_layers: int = field(default=1)  # Number of layers in the cross-attention module when feature_fusion_method is "cross_attention"
-    geometry_merger_type: str = field(default="mlp")  # Type of geometry feature merger ("mlp", "avg")
+    geometry_merger_type: str = field(default="mlp")
+    geo_encoder_out_layer_index: int = field(default=-1,
+        metadata={"help": "Which out_layer to extract from DA3 backbone. -1=last, 0=first."})  # Type of geometry feature merger ("mlp", "avg")
 
     geo_cross_attn: bool = field(default=False)
     geo_inject_version: str = field(default="v2_flash")

@@ -1705,11 +1705,16 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLPreTrainedModel, Gene
         )
         
         # Create geometry encoder
+        _geo_enc_kwargs = {}
+        _out_layer_idx = getattr(config, "geo_encoder_out_layer_index", -1)
+        if _out_layer_idx != -1:
+            _geo_enc_kwargs["out_layer_index"] = int(_out_layer_idx)
         self.geometry_encoder = create_geometry_encoder(
             encoder_type=encoder_config.encoder_type,
             model_path=encoder_config.model_path,
             reference_frame=encoder_config.reference_frame,
             freeze_encoder=encoder_config.freeze_encoder,
+            **_geo_enc_kwargs,
         )
         
         # Create feature merger
