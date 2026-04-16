@@ -1,0 +1,43 @@
+# ZenView GRPO default config
+model_name_or_path: /home/chenbp/sp_re_cbp/GeoThinker/checkpoints/GeoThinker-VGGT-Scaled-Qwen25VL-7B
+reference_model_name_or_path: /home/chenbp/sp_re_cbp/GeoThinker/checkpoints/GeoThinker-VGGT-Scaled-Qwen25VL-7B
+train_file: /home/chenbp/zenview_master_filtered.jsonl
+val_file: null
+image_root: /home/chenbp/sp_re_cbp/GeoThinker
+output_dir: /home/chenbp/sp_re_cbp/GeoThinker/outputs/zenview_grpo
+
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-6
+weight_decay: 0.0
+num_train_epochs: 1
+max_prompt_length: 2048
+max_new_tokens: 384
+warmup_ratio: 0.05
+max_grad_norm: 1.0
+
+group_size: 4
+ppo_clip_range: 0.2
+kl_coef: 0.02
+entropy_coef: 0.0
+advantage_norm: zscore
+
+temperature: 0.9
+top_p: 0.95
+
+reward_weights:
+  think_acc_weight: 0.25
+  logic_word_weight: 0.05
+
+bf16: true
+fp16: false
+dataloader_num_workers: 2
+
+save_steps: 200
+eval_steps: 200
+logging_steps: 10
+sample_log_steps: 50
+seed: 42
+
+max_train_samples: null
+lang: en
